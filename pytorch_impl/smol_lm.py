@@ -1,15 +1,16 @@
 import torch
+import math
 import torch.nn as nn
-from typing import List
+import torch.nn.functional as F
+from torch import Module, Tensor
+from typing import List, Tuple
 
 # creating a vocabulary from the dataset and functions to encode/decode
 with open("../shakespeare.txt", "r") as f:
     text = f.read()
 
 chars = sorted(set(text))
-
 char_to_idx = {c: i for i, c in enumerate(chars)}
-
 idx_to_char = {i: c for i, c in enumerate(chars)}
 
 
@@ -44,9 +45,7 @@ def get_batch(split: str, batch_size: int, context_length: int):
     return x.to(device), y.to(device)
 
 
-# LayerNorm (with Y(gamma) and B(beta) params to train)
-
-
+# LayerNorm (with Y(weight) and B(bias) params to train)
 # class LayerNorm(nn.Module):
 #     def __init__(self, dims, eps=1e-5) -> None:
 #         super().__init__()
@@ -73,14 +72,17 @@ class RMSNorm(nn.Module):
         return (x / rms) * self.weight
 
 
-def precompute_rope_freqs(head_dim: int, max_seq_len: int, base: float = 10000.0):
+# RoPE implementation (first calculate all the frequencies to avoid computing them again and again)
+def precompute_rope_freqs(
+    head_dim: int, max_seq_len: int, base: float = 10000.0
+) -> Tuple[Tensor, Tensor]:
     freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
     postions = torch.arange(max_seq_len).float()
-    angles = torch.outer(freqs, postions)
+    angles = torch.outer(postions, freqs)
     return torch.cos(angles), torch.sin(angles)
 
 
-def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     seq_len = x.shape[2]
     cos = cos[:seq_len].unsqueeze(0).unsqueeze(0)
     sin = sin[:seq_len].unsqueeze(0).unsqueeze(0)
@@ -92,3 +94,81 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
     out2 = x1 * sin + x2 * cos
 
     return torch.stack([out1, out2], dim=-1).flatten(-2)
+
+
+def repeat_kv(x: Tensor, n_rep: int) -> Tensor:
+    if n_rep == 1:
+        return x
+    b, n_kv, seq, hd = x.shape
+    return (
+        x[:, :, None, :, :]
+        .expand(b, n_kv, n_rep, seq, hd)
+        .reshape(b, n_kv * n_rep, seq, hd)
+    )
+
+
+class GQA(nn.Module):
+    def __init__(
+        self,
+        d_model: int = 256,
+        n_heads: int = 8,
+        head_dim: int = 32,
+        n_kv_heads: int = 2,
+        max_seq_len: int = 128,
+    ) -> None:
+        super().__init__()
+
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = head_dim
+        self.n_rep = n_heads // n_kv_heads
+
+        self.q_proj = nn.Linear(
+            d_model, n_heads * head_dim
+        )  # 256 -> 8 * 32 ==> 256 -> 256
+
+        self.k_proj = nn.Linear(
+            d_model, n_kv_heads * head_dim
+        )  # 256 -> 2 * 32 ==> 256 -> 64 (4 times smaller!!)
+
+        self.v_proj = nn.Linear(d_model, n_kv_heads * head_dim)
+
+        self.o_proj = nn.Linear(n_heads * head_dim, d_model)
+
+        cos, sin = precompute_rope_freqs(head_dim, max_seq_len)
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
+
+    def forward(self, x: Tensor, head_dim: int) -> Tensor:
+        q = self.q_proj(x)  # [b, seq, 256]
+        k = self.k_proj(x)  # [b, seq, 64]
+        v = self.v_proj(x)  # [b, seq, 64]
+
+        b, seq, _ = x.shape
+
+        q = q.view(b, seq, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, seq, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, seq, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        q = apply_rope(q, self.rope_cos, self.rope_sin)
+        k = apply_rope(k, self.rope_cos, self.rope_sin)
+
+        k = repeat_kv(k, self.n_rep)
+        v = repeat_kv(v, self.n_rep)
+
+        # Attention scores
+        scale = 1.0 / math.sqrt(head_dim)
+        scores = (q @ k.transpose(-2, -1)) * scale
+
+        mask = torch.triu(torch.ones(seq, seq, device=x.device), diagonal=1).bool()
+        scores = scores.masked_fill(mask, float("-inf"))
+
+        weights = F.softmax(scores, dim=-1)
+        weights = F.dropout(weights, p=0.2, training=self.training)
+        out = weights @ v
+
+        # Merge heads
+        out = out.transpose(1, 2).contiguous()
+        out = out.view(b, seq, self.n_heads * self.head_dim)
+
+        return self.o_proj(out)
