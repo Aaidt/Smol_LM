@@ -71,3 +71,24 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         return (x / rms) * self.weight
+
+
+def precompute_rope_freqs(head_dim: int, max_seq_len: int, base: float = 10000.0):
+    freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    postions = torch.arange(max_seq_len).float()
+    angles = torch.outer(freqs, postions)
+    return torch.cos(angles), torch.sin(angles)
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+    seq_len = x.shape[2]
+    cos = cos[:seq_len].unsqueeze(0).unsqueeze(0)
+    sin = sin[:seq_len].unsqueeze(0).unsqueeze(0)
+
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+
+    out1 = x1 * cos - x2 * sin
+    out2 = x1 * sin + x2 * cos
+
+    return torch.stack([out1, out2], dim=-1).flatten(-2)
