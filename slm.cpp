@@ -26,28 +26,35 @@ std::string decode(std::vector<int> vec, std::map<int, char> &idx_to_char) {
 
 class Tensor {
  private:
-   std::vector<int> data;
+   std::vector<std::vector<int>> data;
 
  public:
    Tensor() {}
 
-   Tensor(const std::vector<int> &values) : data(values) {}
+   Tensor(const std::vector<std::vector<int>> &values) : data(values) {}
 
    void print() const {
       std::cout << "[ ";
-      for (const int &x : data) {
-         std::cout << x << " ";
+      for (const auto &row : data) {
+         for (const auto &x : row) {
+            std::cout << x << " ";
+         }
       }
       std::cout << "]\n";
    }
 
-   int size() const { return data.size(); }
+   int rows() const { return data.size(); }
 
-   int operator[](int idx) const { return data[idx]; }
+   int cols() const {
+      if (data.empty())
+         return 0;
+      return data[0].size();
+   }
+   std::vector<int> &operator[](int idx) const { return data[idx]; }
 };
 
 namespace torch {
-Tensor randint(int max, int size) {
+std::vector<int> randint(int max, int size) {
    std::mt19937 rng(std::random_device{}());
 
    std::uniform_int_distribution<int> dist(0, max - 1);
@@ -58,7 +65,13 @@ Tensor randint(int max, int size) {
       result.push_back(dist(rng));
    }
 
-   return Tensor(result);
+   return result;
+}
+
+Tensor stack(Tensor t1, Tensor t2, int dims) {
+   Tensor result;
+
+   return result;
 }
 } // namespace torch
 
