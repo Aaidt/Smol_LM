@@ -110,11 +110,11 @@ def repeat_kv(x: Tensor, n_rep: int) -> Tensor:
 class GQA(nn.Module):
     def __init__(
         self,
-        d_model: int = 256,
-        n_heads: int = 8,
-        head_dim: int = 32,
-        n_kv_heads: int = 2,
-        max_seq_len: int = 128,
+        d_model: int,
+        n_heads: int,
+        head_dim: int,
+        n_kv_heads: int,
+        max_seq_len: int,
     ) -> None:
         super().__init__()
 
@@ -183,3 +183,24 @@ class SWiGLU(nn.Module):
         gate = F.silu(self.w_gate(x))
         up = self.w_up(x)
         return F.dropout(self.w_down(gate * up), p=0.2, training=self.training)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_kv_heads: int,
+        n_heads: int,
+        ffn_hidden_dims: int,
+        max_seq_len: int,
+    ) -> None:
+        self.attn_norm = RMSNorm(d_model)
+        self.ffn_norm = RMSNorm(d_model)
+        head_dim = n_heads // d_model
+        self.attention = GQA(d_model, n_heads, head_dim, n_kv_heads, max_seq_len)
+        self.ffn = SWiGLU(d_model, ffn_hidden_dims)
+
+    def forward(self, x: Tensor):
+        x = x + self.attention(self.attn_norm(x))
+        x = x + self.ffn(self.ffn_norm(x))
+        return x
