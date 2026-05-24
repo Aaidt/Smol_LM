@@ -2,7 +2,7 @@ import torch
 import math
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Module, Tensor
+from torch import Tensor
 from typing import List, Tuple
 
 # creating a vocabulary from the dataset and functions to encode/decode
@@ -135,9 +135,7 @@ class GQA(nn.Module):
 
         self.o_proj = nn.Linear(n_heads * head_dim, d_model)
 
-        cos, sin = precompute_rope_freqs(head_dim, max_seq_len)
-        self.register_buffer("rope_cos", cos)
-        self.register_buffer("rope_sin", sin)
+        self.rope_cos, self.rope_sin = precompute_rope_freqs(head_dim, max_seq_len)
 
     def forward(self, x: Tensor, head_dim: int) -> Tensor:
         q = self.q_proj(x)  # [b, seq, 256]
@@ -172,3 +170,16 @@ class GQA(nn.Module):
         out = out.view(b, seq, self.n_heads * self.head_dim)
 
         return self.o_proj(out)
+
+
+class SWiGLU(nn.Module):
+    def __init__(self, d_model: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.w_gate = nn.Linear(d_model, hidden_dim)
+        self.w_up = nn.Linear(d_model, hidden_dim)
+        self.w_down = nn.Linear(hidden_dim, d_model)
+
+    def forward(self, x: Tensor):
+        gate = F.silu(self.w_gate(x))
+        up = self.w_up(x)
+        return F.dropout(self.w_down(gate * up), p=0.2, training=self.training)
