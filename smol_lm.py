@@ -6,7 +6,7 @@ from torch import Tensor
 from typing import List, Tuple
 
 # creating a vocabulary from the dataset and functions to encode/decode
-with open("../shakespeare.txt", "r") as f:
+with open("shakespeare.txt", "r") as f:
     text = f.read()
 
 chars = sorted(set(text))
@@ -37,9 +37,9 @@ def get_batch(split: str, batch_size: int, context_length: int):
     d = train_data if split == "train" else val_data
     ix = torch.randint(len(d) - context_length, (batch_size,))
 
-    x = torch.stack([torch.tensor(d[i : i + context_length] for i in ix.tolist())])
+    x = torch.stack([torch.tensor(d[i : i + context_length]) for i in ix.tolist()])
     y = torch.stack(
-        [torch.tensor(d[i + 1 : i + context_length + 1] for i in ix.tolist())]
+        [torch.tensor(d[i + 1 : i + context_length + 1]) for i in ix.tolist()]
     )
 
     return x.to(device), y.to(device)
@@ -137,7 +137,7 @@ class GQA(nn.Module):
 
         self.rope_cos, self.rope_sin = precompute_rope_freqs(head_dim, max_seq_len)
 
-    def forward(self, x: Tensor, head_dim: int) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         q = self.q_proj(x)  # [b, seq, 256]
         k = self.k_proj(x)  # [b, seq, 64]
         v = self.v_proj(x)  # [b, seq, 64]
@@ -155,7 +155,7 @@ class GQA(nn.Module):
         v = repeat_kv(v, self.n_rep)
 
         # Attention scores
-        scale = 1.0 / math.sqrt(head_dim)
+        scale = 1.0 / math.sqrt(self.head_dim)
         scores = (q @ k.transpose(-2, -1)) * scale
 
         mask = torch.triu(torch.ones(seq, seq, device=x.device), diagonal=1).bool()
@@ -194,9 +194,10 @@ class TransformerBlock(nn.Module):
         ffn_hidden_dims: int,
         max_seq_len: int,
     ) -> None:
+        super().__init__()
         self.attn_norm = RMSNorm(d_model)
         self.ffn_norm = RMSNorm(d_model)
-        head_dim = n_heads // d_model
+        head_dim = d_model // n_heads
         self.attention = GQA(d_model, n_heads, head_dim, n_kv_heads, max_seq_len)
         self.ffn = SWiGLU(d_model, ffn_hidden_dims)
 
@@ -204,3 +205,76 @@ class TransformerBlock(nn.Module):
         x = x + self.attention(self.attn_norm(x))
         x = x + self.ffn(self.ffn_norm(x))
         return x
+
+
+class Smol_LM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int = 256,
+        n_heads: int = 8,
+        n_kv_heads: int = 2,
+        num_layers: int = 6,
+        ffn_hidden_mult: int = 4,
+        max_seq_len: int = 256,
+    ) -> None:
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        head_dim = d_model // n_heads
+        ffn_hidden_dims = ffn_hidden_mult * d_model
+
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model, n_kv_heads, n_heads, ffn_hidden_dims, max_seq_len
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        self.final_norm = RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        self.token_emb.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(
+        self, x: Tensor, targets: Tensor | None = None
+    ) -> Tuple[Tensor, Tensor | None]:
+        x = self.token_emb(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.final_norm(x)
+        logits = self.lm_head(x)
+
+        loss = None
+        if targets is not None:
+            B, T, C = logits.shape
+            loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(
+        self, idx: Tensor, max_new_tokens: int, temperature: float = 1.0
+    ) -> Tensor:
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.max_seq_len :]
+            logits, _ = self.forward(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx
