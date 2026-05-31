@@ -135,7 +135,9 @@ class GQA(nn.Module):
 
         self.o_proj = nn.Linear(n_heads * head_dim, d_model)
 
-        self.rope_cos, self.rope_sin = precompute_rope_freqs(head_dim, max_seq_len)
+        cos, sin = precompute_rope_freqs(head_dim, max_seq_len)
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
 
     def forward(self, x: Tensor) -> Tensor:
         q = self.q_proj(x)  # [b, seq, 256]
