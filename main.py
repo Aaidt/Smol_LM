@@ -27,12 +27,12 @@ def main():
     n_heads = 8
     n_kv_heads = 2
     num_layers = 6
-    max_seq_len = 128
-    batch_size = 16
+    max_seq_len = 256
+    batch_size = 64
     learning_rate = 3e-4
-    max_iters = 2000
-    eval_interval = 200
-    eval_iters = 10
+    max_iters = 5000
+    eval_interval = 500
+    eval_iters = 20
 
     model = Smol_LM(
         vocab_size=vocab_size,
